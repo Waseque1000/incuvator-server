@@ -7,8 +7,12 @@ const app = express();
 const port = process.env.PORT || 9000;
 
 app.use(cors());
-app.use(express.json());
 
+app.use(cors({
+  origin: "*" // Allows all origins (safe for now, change later if needed)
+}));
+ 
+app.use(express.json());
 app.get("/", (req, res) => res.send("✅ Server OK"));
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.vvmbcal.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
