@@ -1,20 +1,22 @@
 const express = require("express");
 const cors = require("cors");
-const { MongoClient, ObjectId, ServerApiVersion } = require("mongodb");
-const app = express();
+const { MongoClient, ServerApiVersion } = require("mongodb");
 require("dotenv").config();
-const port = process.env.PORT || 5000;
+
+const app = express();
+const port = process.env.PORT || 9000;
 
 app.use(cors());
 app.use(express.json());
 
-app.get("/", (req, res) => {
-  res.send("Hello from server");
-});
+app.get("/", (req, res) => res.send("✅ Server OK"));
 
-const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASSWORD}@cluster0.esfshrg.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
+const uri = `mongodb+srv://${encodeURIComponent(
+  process.env.DB_USER
+)}:${encodeURIComponent(
+  process.env.DB_PASSWORD
+)}@cluster0.vvmbcal.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
@@ -24,134 +26,153 @@ const client = new MongoClient(uri, {
 });
 
 async function run() {
+  await client.connect();
+  console.log("✅ MongoDB Connected");
+
+  const db = client.db("ProgressDB");
+  const users = db.collection("users"); // 1 user doc per email
+
+  // unique email index
   try {
-    // Connect the client to the server
-    // await client.connect();
+    await users.createIndex({ email: 1 }, { unique: true });
+    console.log("✅ Unique index on email created");
+  } catch (e) {
+    console.log("⚠️ Index info:", e.message);
+  }
 
-    // ?collection
-    const visacollection = client.db("VisaDB").collection("visa");
-    const applicationVisa = client.db("VisaDB").collection("applicationVisa");
-    // const visaCollection = database.collection("visa");
+  // ✅ POST /api/updates
+  // Same email + same date => SAME row, append module to modules[]
+  // Same email + new date  => NEW row
+  app.post("/api/updates", async (req, res) => {
+    try {
+      const { date, name, email, needGuidelines } = req.body || {};
+      const moduleValue =
+        req.body?.module || req.body?.currentModule || req.body?.current_module;
 
-    // POST - Add a new visa
-    app.post("/addvisa", async (req, res) => {
-      const newVisa = req.body;
-      // console.log(newVisa);
-      const result = await visacollection.insertOne(newVisa);
-      res.send(result);
-    });
-
-    // GET - Fetch all visas
-    app.get("/addvisa", async (req, res) => {
-      try {
-        const visas = await visacollection.find().toArray();
-        res.send(visas);
-      } catch (error) {
-        res.status(500).send({ message: "Failed to fetch visas" });
+      if (!date || !name || !email || !moduleValue) {
+        return res.status(400).json({
+          message: "Missing required fields",
+          need: ["date", "name", "email", "module"],
+          got: req.body,
+        });
       }
-    });
 
-    //
-    app.delete("/addvisa/:id", async (req, res) => {
-      const visaId = req.params.id;
-      const result = await visacollection.deleteOne({
-        _id: new ObjectId(visaId),
+      const cleanEmail = String(email).trim().toLowerCase();
+      const cleanDate = String(date).trim();
+      const cleanModule = String(moduleValue).trim();
+
+      if (!cleanEmail.includes("@")) {
+        return res.status(400).json({ message: "Invalid email address." });
+      }
+
+      // check if same email already has history row for same date
+      const existsSameDate = await users.findOne({
+        email: cleanEmail,
+        "history.date": cleanDate,
       });
 
-      res.send(result);
-    });
+      // ✅ SAME EMAIL + SAME DATE => update row + add module to modules[]
+      if (existsSameDate) {
+        await users.updateOne(
+          { email: cleanEmail },
+          {
+            $set: {
+              name: String(name).trim(),
+              email: cleanEmail,
+              updatedAt: new Date(),
+              lastModule: cleanModule,
+              lastDate: cleanDate,
+              lastNeedGuidelines: Boolean(needGuidelines),
 
-    //! application for visa
-    app.post("/myvisa", async (req, res) => {
-      const newVisa = req.body;
-      // console.log(newVisa);
-      const result = await applicationVisa.insertOne(newVisa);
-      res.send(result);
-    });
+              // latest module for that day (for UI "current")
+              "history.$[d].module": cleanModule,
+              "history.$[d].needGuidelines": Boolean(needGuidelines),
+              "history.$[d].updatedAt": new Date(),
+            },
 
-    app.get("/myvisa", async (req, res) => {
-      const visas = await applicationVisa.find().toArray();
-      res.send(visas);
-    });
-
-    //
-    app.delete("/myvisa/:id", async (req, res) => {
-      const visaId = req.params.id;
-      const result = await applicationVisa.deleteOne({
-        _id: new ObjectId(visaId),
-      });
-
-      res.send(result);
-    });
-
-    // TODO: Update;
-    app.patch("/addvisa/:id", async (req, res) => {
-      const id = req.params.id;
-      const updatedVisa = req.body;
-
-      // Remove _id from the updatedVisa object to avoid attempting to modify it
-      delete updatedVisa._id;
-
-      // console.log("Updating visa with ID:", id);
-      // console.log("Updated visa details:", updatedVisa);
-
-      try {
-        // Update the document, excluding the _id field from the update
-        const result = await visacollection.updateOne(
-          { _id: new ObjectId(id) }, // Match by the original _id
-          { $set: updatedVisa } // Set the updated fields
+            // ✅ keep previous modules (NO LOSS)
+            $addToSet: {
+              "history.$[d].modules": cleanModule,
+            },
+          },
+          { arrayFilters: [{ "d.date": cleanDate }] }
         );
 
-        if (result.matchedCount === 0) {
-          return res.status(404).send({ message: "Visa not found" });
-        }
-
-        res.status(200).send({ message: "Visa updated successfully", result });
-      } catch (error) {
-        console.error("Error updating visa:", error);
-        res.status(500).send({ message: "Failed to update visa", error });
+        return res.json({
+          ok: true,
+          mode: "same_day_append",
+          message: "Same day updated: module added ✅",
+        });
       }
-    });
 
-    // ! my application
-    // GET - Fetch applications by email
-    app.get("/myvisa/:email", async (req, res) => {
-      const email = req.params.email; // Extract email from request params
-      // console.log(email);
+      // ✅ NEW DATE => create new row
+      const newRow = {
+        date: cleanDate,
+        module: cleanModule, // latest module for that day
+        modules: [cleanModule], // all modules of that day
+        needGuidelines: Boolean(needGuidelines),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
 
-      try {
-        // Query the database for all documents with the matching email
-        const applications = await applicationVisa.find({ email }).toArray();
+      await users.updateOne(
+        { email: cleanEmail },
+        {
+          $set: {
+            name: String(name).trim(),
+            email: cleanEmail,
+            updatedAt: new Date(),
+            lastModule: cleanModule,
+            lastDate: cleanDate,
+            lastNeedGuidelines: Boolean(needGuidelines),
+          },
+          $setOnInsert: {
+            createdAt: new Date(),
+          },
+          $push: {
+            history: newRow,
+          },
+        },
+        { upsert: true }
+      );
 
-        // Check if there are matching results
-        if (applications.length === 0) {
-          return res
-            .status(404)
-            .json({ message: "No applications found for this email" });
-        }
+      return res.json({
+        ok: true,
+        mode: "new_day_row",
+        message: "New day row created ✅",
+      });
+    } catch (err) {
+      console.error("POST /api/updates error:", err);
+      return res.status(500).json({
+        message: "Failed to save update",
+        error: err?.message || String(err),
+      });
+    }
+  });
 
-        // Respond with the matched applications
-        res.status(200).send(applications);
-      } catch (error) {
-        console.error("Error fetching applications:", error);
-        res
-          .status(500)
-          .send({ message: "Failed to fetch applications", error });
-      }
-    });
+  // ✅ GET /api/updates
+  app.get("/api/updates", async (req, res) => {
+    try {
+      const result = await users.find({}).sort({ updatedAt: -1 }).toArray();
+      res.json(result);
+    } catch (err) {
+      console.error("GET /api/updates error:", err);
+      res.status(500).json({ message: "Failed to load updates" });
+    }
+  });
 
-    // Send a ping to confirm a successful connection
-    // await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
-  }
+  // ✅ DELETE /api/updates (clear all)
+  app.delete("/api/updates", async (req, res) => {
+    try {
+      const result = await users.deleteMany({});
+      res.json({ ok: true, deletedCount: result.deletedCount });
+    } catch (err) {
+      console.error("DELETE /api/updates error:", err);
+      res.status(500).json({ message: "Failed to clear updates" });
+    }
+  });
 }
-run().catch(console.dir);
 
-app.listen(port, () => {
-  console.log(`Server Running...,   ${port}`);
-});
+run().catch((e) => console.error("❌ DB error:", e));
+
+app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
